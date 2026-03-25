@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string (optional)
+    //   - email: string (required, email format)
+    //   - photoURL: string (optional)
+    //
+    // Collection: innovations
+    // Document ID: {innovationId}
+    // Fields:
+    //   - userId: string (required)
+    //   - createdAt: timestamp (required)
+    //   - updatedAt: timestamp (optional)
+    //   - status: string (required, enum: ['draft', 'submitted'])
+    //   - profilInovasi: map (required)
+    //   - indikatorInovasi: map (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidInnovation(data) {
+      return data.keys().hasAll(['userId', 'createdAt', 'status', 'profilInovasi', 'indikatorInovasi']) &&
+             data.userId is string &&
+             data.status in ['draft', 'submitted'] &&
+             data.profilInovasi is map &&
+             data.indikatorInovasi is map;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+    }
+
+    match /innovations/{innovationId} {
+      allow read: if isDocOwner();
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid && 
+                      isValidInnovation(request.resource.data);
+      allow update: if isDocOwner() && 
+                      request.resource.data.userId == resource.data.userId &&
+                      isValidInnovation(request.resource.data);
+      allow delete: if isDocOwner();
+    }
+  }
+}
