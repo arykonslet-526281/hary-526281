@@ -12,6 +12,7 @@ import {
   signInWithPopup, 
   signOut, 
   onAuthStateChanged, 
+  signInAnonymously,
   doc, 
   getDoc, 
   setDoc, 
@@ -55,9 +56,20 @@ import { cn } from './lib/utils';
 
 interface UserProfile {
   uid: string;
+  username?: string;
   displayName: string | null;
   email: string | null;
   photoURL: string | null;
+  isAdmin?: boolean;
+}
+
+interface AuthorizedUser {
+  id?: string;
+  username: string;
+  password?: string;
+  role: 'admin' | 'user';
+  keterangan?: string;
+  createdAt: any;
 }
 
 interface ProfilInovasi {
@@ -240,47 +252,6 @@ const INDICATOR_METADATA: Record<keyof IndikatorInovasi, { label: string; deskri
   }
 };
 
-const PERANGKAT_DAERAH_OPTIONS = [
-  "Sekretariat Daerah",
-  "Sekretariat DPRD",
-  "Inspektorat Daerah",
-  "Badan Kesatuan Bangsa dan Politik",
-  "Badan Penanggulangan Bencana Daerah",
-  "Badan Kepegawaian dan Pengembangan Sumber Daya Manusia",
-  "Badan Pengelolaan Keuangan dan Pendapatan Daerah",
-  "Badan Perencanaan Pembangunan, Penelitian dan Pengembangan Daerah",
-  "Dinas Kependudukan dan Catatan Sipil",
-  "Dinas Komunikasi, Informatika, Statistik dan Persandian",
-  "Satuan Polisi Pamong Praja, Pemadan Kebakaran dan Penyelamatan",
-  "Dinas Perpustakaan dan Kearsipan",
-  "Dinas Kesehatan",
-  "Dinas Pendidikan, Pemuda dan Olahraga",
-  "Dinas Pemberdayaan Perempuan, Pelindungan Anak, Pengendalian Penduduk dan Keluarga Berencana",
-  "Dinas Sosial",
-  "Dinas Penanaman Modal, Pelayanan Terpadu Satu Pintu",
-  "Dinas Perdagangan, Koperasi, Usaha Kecil dan Menengah",
-  "Dinas Perindustrian, dan Tenaga Kerja",
-  "Dinas Perikanan",
-  "Dinas Pertanian dan Ketahanan Pangan",
-  "Dinas Lingkungan Hidup",
-  "Dinas Pariwisata dan Kebudayaan",
-  "Dinas Pekerjaan Umum dan Tata Ruang",
-  "Dinas Perumahan dan Kawasan Permukiman",
-  "Dinas Perhubungan",
-  "Dinas Pemberdayaan Masyarakat dan Desa",
-  "Kecamatan Benteng",
-  "Kecamatan Bontoharu",
-  "Kecamatan Bontomanai",
-  "Kecamatan Bontomatene",
-  "Kecamatan Bontosikuyu",
-  "Kecamatan Buki",
-  "Kecamatan Pasilambena",
-  "Kecamatan Pasimarannu",
-  "Kecamatan Pasimasungggu",
-  "Kecamatan Pasimasungggu Timur",
-  "Kecamatan Takabonerate"
-];
-
 const DESA_OPTIONS = [
   "Kel. Batangmata",
   "Desa Maharayya",
@@ -412,12 +383,54 @@ const INITIAL_INDIKATOR: IndikatorInovasi = {
 
 // --- Components ---
 
+// Firestore Error Handling
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  // Don't throw if it's just a permission error during initial load, just log it
+  if (errInfo.error.includes('permission-denied')) {
+    return;
+  }
+  throw new Error(JSON.stringify(errInfo));
+}
+
 export default function App() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [view, setView] = useState<'dashboard' | 'form'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'form' | 'users'>('dashboard');
   const [currentForm, setCurrentForm] = useState<InnovationForm | null>(null);
   const [innovations, setInnovations] = useState<InnovationForm[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -426,18 +439,29 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        // Fetch existing profile from Firestore to preserve isAdmin status and custom names
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        const existingData = userDoc.exists() ? userDoc.data() as UserProfile : {} as UserProfile;
+
         const userProfile: UserProfile = {
           uid: firebaseUser.uid,
-          displayName: firebaseUser.displayName,
-          email: firebaseUser.email,
-          photoURL: firebaseUser.photoURL,
+          displayName: firebaseUser.displayName || existingData.displayName || (firebaseUser.isAnonymous ? 'Admin' : 'User'),
+          email: firebaseUser.email || existingData.email || null,
+          photoURL: firebaseUser.photoURL || existingData.photoURL || null,
+          isAdmin: existingData.isAdmin || firebaseUser.email === 'dd2870aj.ary@gmail.com'
         };
         setUser(userProfile);
         
         // Save user to Firestore
         await setDoc(doc(db, 'users', firebaseUser.uid), userProfile, { merge: true });
       } else {
-        setUser(null);
+        // Check if there's a session for custom admin (legacy or fallback)
+        const savedAdmin = localStorage.getItem('admin_session');
+        if (savedAdmin) {
+          setUser(JSON.parse(savedAdmin));
+        } else {
+          setUser(null);
+        }
       }
       setLoading(false);
     });
@@ -446,14 +470,82 @@ export default function App() {
 
   // Innovations Listener
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'innovations'), where('userId', '==', user.uid));
+    if (!user || !auth.currentUser) return;
+    
+    let q;
+    if (user.isAdmin) {
+      // Admins see all innovations
+      q = query(collection(db, 'innovations'));
+    } else {
+      // Regular users only see their own
+      q = query(collection(db, 'innovations'), where('userId', '==', user.username || user.uid));
+    }
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as InnovationForm));
       setInnovations(data.sort((a, b) => b.createdAt?.seconds - a.createdAt?.seconds));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'innovations');
     });
     return () => unsubscribe();
   }, [user]);
+
+  const handleAdminLogin = async (username: string, pass: string) => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      // Sign in anonymously to have a Firebase session for rules
+      await signInAnonymously(auth);
+      
+      let adminUser: UserProfile | null = null;
+      if (username === 'admin' && pass === 'Inspiron 1440') {
+        adminUser = {
+          uid: 'super-admin', // This will be replaced by the anonymous UID
+          displayName: 'Super Admin',
+          email: 'admin@system',
+          photoURL: null,
+          isAdmin: true
+        };
+      } else {
+        // Check Firestore for custom users
+        const userDoc = await getDoc(doc(db, 'custom_users', username));
+        if (userDoc.exists() && userDoc.data().password === pass) {
+          adminUser = {
+            uid: username, // This will be replaced by the anonymous UID
+            displayName: username,
+            email: `${username}@local`,
+            photoURL: null,
+            isAdmin: userDoc.data().role === 'admin'
+          };
+        }
+      }
+
+      if (adminUser) {
+        // Sign in anonymously to get a Firebase Auth session
+        const authResult = await signInAnonymously(auth);
+        const firebaseUser = authResult.user;
+        
+        // Update the adminUser with the real anonymous UID
+        const finalAdminUser: UserProfile = {
+          ...adminUser,
+          uid: firebaseUser.uid,
+          username: adminUser.uid // Use the original uid (which was the username) as the username
+        };
+
+        // Save to Firestore so security rules can see it
+        await setDoc(doc(db, 'users', firebaseUser.uid), finalAdminUser, { merge: true });
+        
+        setUser(finalAdminUser);
+        localStorage.setItem('admin_session', JSON.stringify(finalAdminUser));
+      } else {
+        setLoginError('Username atau password salah.');
+      }
+    } catch (error: any) {
+      setLoginError('Gagal login: ' + error.message);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
 
   const handleLogin = async () => {
     if (loginLoading) return;
@@ -480,6 +572,8 @@ export default function App() {
   const handleLogout = async () => {
     try {
       await signOut(auth);
+      localStorage.removeItem('admin_session');
+      setUser(null);
       setView('dashboard');
       setCurrentForm(null);
     } catch (error) {
@@ -490,7 +584,7 @@ export default function App() {
   const startNewForm = () => {
     if (!user) return;
     setCurrentForm({
-      userId: user.uid,
+      userId: user.username || user.uid,
       createdAt: Timestamp.now(),
       status: 'draft',
       profilInovasi: { ...INITIAL_PROFIL },
@@ -522,7 +616,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginScreen onLogin={handleLogin} loading={loginLoading} error={loginError} />;
+    return <LoginScreen onLogin={handleLogin} onAdminLogin={handleAdminLogin} loading={loginLoading} error={loginError} />;
   }
 
   return (
@@ -556,11 +650,21 @@ export default function App() {
               exit={{ opacity: 0 }}
             >
               <Dashboard 
+                user={user}
                 innovations={innovations} 
                 onNew={startNewForm} 
                 onEdit={editForm} 
                 onDelete={deleteForm} 
               />
+            </motion.div>
+          ) : view === 'users' ? (
+            <motion.div 
+              key="user-management"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <UserManagement />
             </motion.div>
           ) : (
             <motion.div 
@@ -592,46 +696,118 @@ export default function App() {
 
 // --- Sub-components ---
 
-function LoginScreen({ onLogin, loading, error }: { onLogin: () => void, loading: boolean, error: string | null }) {
+function LoginScreen({ onLogin, onAdminLogin, loading, error }: { 
+  onLogin: () => void, 
+  onAdminLogin: (u: string, p: string) => void,
+  loading: boolean, 
+  error: string | null 
+}) {
+  const [showAdmin, setShowAdmin] = useState(true);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onAdminLogin(username, password);
+  };
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#f5f5f0] p-4">
+    <div className="min-h-screen flex items-center justify-center bg-[#f8f9fa] p-6">
       <motion.div 
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="max-w-md w-full bg-white rounded-[32px] p-12 shadow-xl shadow-stone-200/50 text-center"
+        className="max-w-[480px] w-full bg-white rounded-[48px] p-12 shadow-[0_32px_64px_-12px_rgba(0,0,0,0.08)] text-center"
       >
-        <div className="mb-8 flex justify-center">
-          <div className="w-16 h-16 bg-emerald-100 rounded-2xl flex items-center justify-center text-emerald-600">
-            <FileText size={32} />
+        <div className="mb-10 flex justify-center">
+          <div className="w-20 h-20 bg-[#dcfce7] rounded-[24px] flex items-center justify-center text-[#059669]">
+            <FileText size={40} strokeWidth={1.5} />
           </div>
         </div>
-        <h1 className="text-3xl font-serif font-bold text-stone-900 mb-2">Sistem Inovasi Daerah</h1>
-        <p className="text-stone-500 mb-8">Silakan masuk untuk mulai mengisi form inovasi daerah Anda.</p>
+        
+        <h1 className="text-[32px] font-serif font-bold text-[#1a1a1a] mb-3 leading-tight">
+          Sistem Inovasi Daerah
+        </h1>
+        <p className="text-stone-500 text-[15px] mb-12 max-w-[320px] mx-auto leading-relaxed">
+          Silakan masuk untuk mulai mengisi form inovasi daerah Anda.
+        </p>
         
         {error && (
-          <div className="mb-6 p-4 bg-red-50 text-red-600 text-sm rounded-2xl flex items-center gap-3">
+          <div className="mb-8 p-4 bg-red-50 text-red-600 text-sm rounded-2xl flex items-center gap-3 border border-red-100">
             <AlertCircle size={18} className="shrink-0" />
-            <p className="text-left">{error}</p>
+            <p className="text-left font-medium">{error}</p>
           </div>
         )}
 
-        <button 
-          onClick={onLogin}
-          disabled={loading}
-          className={cn(
-            "w-full bg-emerald-700 hover:bg-emerald-800 text-white font-medium py-4 rounded-full transition-all flex items-center justify-center gap-3 shadow-lg shadow-emerald-200",
-            loading && "opacity-50 cursor-not-allowed"
-          )}
-        >
-          {loading ? (
-            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
-          ) : (
-            <>
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
-              Masuk dengan Google
-            </>
-          )}
-        </button>
+        {!showAdmin ? (
+          <div className="space-y-6">
+            <button 
+              onClick={onLogin}
+              disabled={loading}
+              className={cn(
+                "w-full bg-[#1a1a1a] hover:bg-black text-white font-semibold py-5 rounded-[32px] transition-all flex items-center justify-center gap-3 shadow-xl shadow-stone-200",
+                loading && "opacity-50 cursor-not-allowed"
+              )}
+            >
+              {loading ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <>
+                  <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+                  Masuk dengan Google
+                </>
+              )}
+            </button>
+            <button 
+              onClick={() => setShowAdmin(true)}
+              className="text-stone-400 text-[13px] font-medium hover:text-stone-600 transition-colors"
+            >
+              Masuk dengan Username & Password
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-8 text-left">
+            <div className="space-y-3">
+              <label className="text-[11px] font-bold text-stone-400 uppercase tracking-[0.15em] ml-1">
+                USERNAME
+              </label>
+              <input 
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full px-6 py-4 rounded-[20px] border border-stone-200 focus:border-stone-400 focus:ring-0 outline-none transition-all text-stone-700 placeholder:text-stone-300"
+                placeholder="admin"
+                required
+              />
+            </div>
+            <div className="space-y-3">
+              <label className="text-[11px] font-bold text-stone-400 uppercase tracking-[0.15em] ml-1">
+                PASSWORD
+              </label>
+              <input 
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full px-6 py-4 rounded-[20px] border border-stone-200 focus:border-stone-400 focus:ring-0 outline-none transition-all text-stone-700 placeholder:text-stone-300"
+                placeholder="••••••••"
+                required
+              />
+            </div>
+            <button 
+              type="submit"
+              disabled={loading}
+              className="w-full bg-[#1a1a1a] hover:bg-black text-white font-bold py-5 rounded-[32px] transition-all flex items-center justify-center gap-3 mt-4"
+            >
+              {loading ? <Loader2 className="animate-spin" /> : 'Masuk'}
+            </button>
+            <button 
+              type="button"
+              onClick={() => setShowAdmin(false)}
+              className="w-full text-stone-400 text-[13px] font-medium hover:text-stone-600 transition-colors text-center mt-2"
+            >
+              Kembali ke Google Login
+            </button>
+          </form>
+        )}
       </motion.div>
     </div>
   );
@@ -641,6 +817,10 @@ function Sidebar({ isOpen, setIsOpen, user, onLogout, view, setView }: any) {
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   ];
+
+  if (user?.isAdmin) {
+    menuItems.push({ id: 'users', label: 'Manajemen User', icon: UserIcon });
+  }
 
   return (
     <aside className={cn(
@@ -696,7 +876,13 @@ function Sidebar({ isOpen, setIsOpen, user, onLogout, view, setView }: any) {
   );
 }
 
-function Dashboard({ innovations, onNew, onEdit, onDelete }: any) {
+function Dashboard({ user, innovations, onNew, onEdit, onDelete }: any) {
+  const [filter, setFilter] = useState<'all' | 'mine'>('mine');
+  
+  const filteredInnovations = user.isAdmin && filter === 'mine' 
+    ? innovations.filter((item: any) => item.userId === (user.username || user.uid))
+    : innovations;
+
   return (
     <div className="max-w-5xl mx-auto">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
@@ -704,27 +890,53 @@ function Dashboard({ innovations, onNew, onEdit, onDelete }: any) {
           <h2 className="text-3xl font-serif font-bold text-stone-900">Dashboard Inovasi</h2>
           <p className="text-stone-500">Kelola daftar inovasi daerah Anda di sini.</p>
         </div>
-        <button 
-          onClick={onNew}
-          className="bg-emerald-700 hover:bg-emerald-800 text-white px-6 py-3 rounded-full flex items-center gap-2 transition-all shadow-lg shadow-emerald-200"
-        >
-          <Plus size={20} />
-          Tambah Inovasi
-        </button>
+        <div className="flex items-center gap-3">
+          {user.isAdmin && (
+            <div className="flex bg-stone-100 p-1 rounded-xl mr-2">
+              <button 
+                onClick={() => setFilter('mine')}
+                className={cn(
+                  "px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                  filter === 'mine' ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-700"
+                )}
+              >
+                Inovasi Saya
+              </button>
+              <button 
+                onClick={() => setFilter('all')}
+                className={cn(
+                  "px-4 py-2 rounded-lg text-sm font-medium transition-all",
+                  filter === 'all' ? "bg-white text-stone-900 shadow-sm" : "text-stone-500 hover:text-stone-700"
+                )}
+              >
+                Semua Inovasi
+              </button>
+            </div>
+          )}
+          <button 
+            onClick={onNew}
+            className="bg-emerald-700 hover:bg-emerald-800 text-white px-6 py-3 rounded-full flex items-center gap-2 transition-all shadow-lg shadow-emerald-200"
+          >
+            <Plus size={20} />
+            Tambah Inovasi
+          </button>
+        </div>
       </div>
 
-      {innovations.length === 0 ? (
+      {filteredInnovations.length === 0 ? (
         <div className="bg-white rounded-[32px] p-12 text-center border border-dashed border-stone-300">
           <div className="w-16 h-16 bg-stone-50 rounded-full flex items-center justify-center text-stone-300 mx-auto mb-4">
             <FileText size={32} />
           </div>
-          <h3 className="text-lg font-medium text-stone-900 mb-1">Belum ada inovasi</h3>
+          <h3 className="text-lg font-medium text-stone-900 mb-1">
+            {filter === 'mine' ? 'Belum ada inovasi Anda' : 'Belum ada inovasi'}
+          </h3>
           <p className="text-stone-500 mb-6">Mulai dengan menambahkan inovasi daerah pertama Anda.</p>
           <button onClick={onNew} className="text-emerald-700 font-medium hover:underline">Tambah Inovasi Baru</button>
         </div>
       ) : (
         <div className="grid gap-4">
-          {innovations.map((item: any) => (
+          {filteredInnovations.map((item: any) => (
             <div 
               key={item.id}
               className="bg-white rounded-3xl p-6 border border-stone-100 shadow-sm hover:shadow-md transition-all flex flex-col md:flex-row md:items-center justify-between gap-4"
@@ -750,26 +962,44 @@ function Dashboard({ innovations, onNew, onEdit, onDelete }: any) {
                         {item.profilInovasi.kategori}
                       </span>
                     )}
+                    {(item.profilInovasi.perangkatDaerah || item.profilInovasi.desa) && (
+                      <>
+                        <span>•</span>
+                        <span className="font-medium text-stone-700">
+                          {item.profilInovasi.perangkatDaerah || item.profilInovasi.desa}
+                        </span>
+                      </>
+                    )}
+                    {user.isAdmin && item.userId !== (user.username || user.uid) && (
+                      <>
+                        <span>•</span>
+                        <span className="text-stone-400 italic">User: {item.userId}</span>
+                      </>
+                    )}
                     <span>•</span>
                     <span>{item.createdAt?.toDate().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button 
-                  onClick={() => onEdit(item)}
-                  className="p-2 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
-                  title="Edit"
-                >
-                  <Edit2 size={20} />
-                </button>
-                <button 
-                  onClick={() => onDelete(item.id)}
-                  className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
-                  title="Hapus"
-                >
-                  <Trash2 size={20} />
-                </button>
+                {(user.isAdmin || item.userId === (user.username || user.uid)) && (
+                  <>
+                    <button 
+                      onClick={() => onEdit(item)}
+                      className="p-2 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-xl transition-all"
+                      title="Edit"
+                    >
+                      <Edit2 size={20} />
+                    </button>
+                    <button 
+                      onClick={() => onDelete(item.id)}
+                      className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                      title="Hapus"
+                    >
+                      <Trash2 size={20} />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           ))}
@@ -839,9 +1069,6 @@ function InnovationFormView(props: { user: UserProfile, form: InnovationForm, on
     const newErrors: string[] = [];
     if (!localForm.profilInovasi.namaInovasi) newErrors.push('Nama Inovasi wajib diisi.');
     if (!localForm.profilInovasi.kategori) newErrors.push('Kategori Inovasi wajib dipilih.');
-    if (localForm.profilInovasi.kategori === 'Perangkat Daerah' && !localForm.profilInovasi.perangkatDaerah) {
-      newErrors.push('Nama Perangkat Daerah wajib dipilih.');
-    }
     if (localForm.profilInovasi.kategori === 'Desa' && !localForm.profilInovasi.desa) {
       newErrors.push('Nama Desa / Kelurahan wajib dipilih.');
     }
@@ -860,7 +1087,20 @@ function InnovationFormView(props: { user: UserProfile, form: InnovationForm, on
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
-    onSave({ ...localForm, status });
+    if (localForm.profilInovasi.kategori === 'Perangkat Daerah') {
+      // Automatically set perangkatDaerah to user's displayName or email
+      const pdName = props.user.displayName || props.user.email || 'Unknown PD';
+      onSave({ 
+        ...localForm, 
+        status,
+        profilInovasi: {
+          ...localForm.profilInovasi,
+          perangkatDaerah: pdName
+        }
+      });
+    } else {
+      onSave({ ...localForm, status });
+    }
   };
 
   return (
@@ -942,18 +1182,15 @@ function InnovationFormView(props: { user: UserProfile, form: InnovationForm, on
               </FormField>
 
               {localForm.profilInovasi.kategori === 'Perangkat Daerah' && (
-                <FormField label="Nama Perangkat Daerah" required>
-                  <select 
-                    value={localForm.profilInovasi.perangkatDaerah}
-                    onChange={(e) => handleProfilChange('perangkatDaerah', e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition-all bg-white"
-                  >
-                    <option value="">Pilih Perangkat Daerah...</option>
-                    {PERANGKAT_DAERAH_OPTIONS.map(opt => (
-                      <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                  </select>
-                </FormField>
+                <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-100 flex items-center gap-3">
+                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-emerald-600 shadow-sm">
+                    <UserIcon size={20} />
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">Perangkat Daerah</p>
+                    <p className="text-sm font-bold text-stone-800">{props.user.displayName || props.user.email}</p>
+                  </div>
+                </div>
               )}
 
               {localForm.profilInovasi.kategori === 'Desa' && (
@@ -1251,6 +1488,228 @@ function IndicatorField({ field, metadata, data, onChange, onUpload }: {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function UserManagement() {
+  const [users, setUsers] = useState<AuthorizedUser[]>([]);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newKeterangan, setNewKeterangan] = useState('');
+  const [newRole, setNewRole] = useState<'admin' | 'user'>('user');
+  const [editingUser, setEditingUser] = useState<AuthorizedUser | null>(null);
+  const [editUsername, setEditUsername] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editKeterangan, setEditKeterangan] = useState('');
+  const [editRole, setEditRole] = useState<'admin' | 'user'>('user');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!auth.currentUser) return;
+    const q = query(collection(db, 'custom_users'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AuthorizedUser));
+      setUsers(data);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'custom_users');
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleAddUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await setDoc(doc(db, 'custom_users', newUsername), {
+        username: newUsername,
+        password: newPassword,
+        role: newRole,
+        keterangan: newKeterangan,
+        createdAt: Timestamp.now()
+      });
+      setNewUsername('');
+      setNewPassword('');
+      setNewKeterangan('');
+    } catch (error) {
+      console.error('Add user error:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEditUser = (u: AuthorizedUser) => {
+    setEditingUser(u);
+    setEditUsername(u.username);
+    setEditPassword(u.password);
+    setEditKeterangan(u.keterangan || '');
+    setEditRole(u.role);
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    setLoading(true);
+    try {
+      // If username changed, we need to delete old doc and create new one
+      if (editUsername !== editingUser.username) {
+        await deleteDoc(doc(db, 'custom_users', editingUser.username));
+      }
+      
+      await setDoc(doc(db, 'custom_users', editUsername), {
+        username: editUsername,
+        password: editPassword,
+        role: editRole,
+        keterangan: editKeterangan,
+        updatedAt: Timestamp.now()
+      });
+      
+      setEditingUser(null);
+    } catch (error) {
+      console.error('Update user error:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteUser = async (id: string) => {
+    if (!confirm('Hapus user ini?')) return;
+    try {
+      await deleteDoc(doc(db, 'custom_users', id));
+    } catch (error) {
+      console.error('Delete user error:', error);
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-serif font-bold text-stone-900">Manajemen User</h2>
+      </div>
+
+      <div className="bg-white p-8 rounded-[32px] shadow-sm border border-stone-100">
+        <h3 className="text-lg font-bold text-stone-900 mb-6">
+          {editingUser ? 'Edit User' : 'Tambah User Baru'}
+        </h3>
+        <form onSubmit={editingUser ? handleUpdateUser : handleAddUser} className="grid md:grid-cols-5 gap-4 items-end">
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold text-stone-400 uppercase tracking-widest">Username</label>
+            <input 
+              type="text"
+              value={editingUser ? editUsername : newUsername}
+              onChange={(e) => editingUser ? setEditUsername(e.target.value) : setNewUsername(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+              placeholder="username"
+              required
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold text-stone-400 uppercase tracking-widest">Password</label>
+            <input 
+              type="text"
+              value={editingUser ? editPassword : newPassword}
+              onChange={(e) => editingUser ? setEditPassword(e.target.value) : setNewPassword(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+              placeholder="password"
+              required
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold text-stone-400 uppercase tracking-widest">Keterangan</label>
+            <input 
+              type="text"
+              value={editingUser ? editKeterangan : newKeterangan}
+              onChange={(e) => editingUser ? setEditKeterangan(e.target.value) : setNewKeterangan(e.target.value)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+              placeholder="keterangan"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-bold text-stone-400 uppercase tracking-widest">Role</label>
+            <select 
+              value={editingUser ? editRole : newRole}
+              onChange={(e) => editingUser ? setEditRole(e.target.value as any) : setNewRole(e.target.value as any)}
+              className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+            >
+              <option value="user">User</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <button 
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-emerald-700 hover:bg-emerald-800 text-white font-medium py-3 rounded-xl transition-all flex items-center justify-center gap-2"
+            >
+              {loading ? <Loader2 className="animate-spin" size={18} /> : (editingUser ? <Save size={18} /> : <Plus size={18} />)}
+              {editingUser ? 'Simpan' : 'Tambah User'}
+            </button>
+            {editingUser && (
+              <button 
+                type="button"
+                onClick={() => setEditingUser(null)}
+                className="px-4 py-3 rounded-xl border border-stone-200 text-stone-600 hover:bg-stone-50 transition-all font-medium"
+              >
+                Batal
+              </button>
+            )}
+          </div>
+        </form>
+      </div>
+
+      <div className="bg-white rounded-[32px] shadow-sm border border-stone-100 overflow-hidden">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="bg-stone-50 border-b border-stone-100">
+              <th className="px-6 py-4 text-xs font-bold text-stone-400 uppercase tracking-widest">Username</th>
+              <th className="px-6 py-4 text-xs font-bold text-stone-400 uppercase tracking-widest">Password</th>
+              <th className="px-6 py-4 text-xs font-bold text-stone-400 uppercase tracking-widest">Keterangan</th>
+              <th className="px-6 py-4 text-xs font-bold text-stone-400 uppercase tracking-widest">Role</th>
+              <th className="px-6 py-4 text-xs font-bold text-stone-400 uppercase tracking-widest text-right">Aksi</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-stone-50">
+            {users.map((u) => (
+              <tr key={u.id} className="hover:bg-stone-50/50 transition-colors">
+                <td className="px-6 py-4 font-medium text-stone-900">{u.username}</td>
+                <td className="px-6 py-4 text-stone-500">{u.password}</td>
+                <td className="px-6 py-4 text-stone-500">{u.keterangan || '-'}</td>
+                <td className="px-6 py-4">
+                  <span className={cn(
+                    "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider",
+                    u.role === 'admin' ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"
+                  )}>
+                    {u.role}
+                  </span>
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <div className="flex items-center justify-end gap-2">
+                    <button 
+                      onClick={() => handleEditUser(u)}
+                      className="p-2 text-stone-400 hover:text-emerald-600 transition-colors"
+                    >
+                      <Edit2 size={18} />
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteUser(u.id!)}
+                      className="p-2 text-stone-400 hover:text-red-600 transition-colors"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {users.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-6 py-12 text-center text-stone-400 italic">
+                  Belum ada user tambahan.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

@@ -37,7 +37,20 @@ service cloud.firestore {
     }
 
     function isDocOwner() {
-      return isAuthenticated() && request.auth.uid == resource.data.userId;
+      return isAuthenticated() && 
+             (request.auth.uid == resource.data.userId || 
+              (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+               get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == resource.data.userId));
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+             (
+               (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+                get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true) ||
+               request.auth.uid == 'super-admin' ||
+               request.auth.token.email == 'dd2870aj.ary@gmail.com'
+             );
     }
 
     function isValidUser(data) {
@@ -60,20 +73,28 @@ service cloud.firestore {
     // ===============================================================
 
     match /users/{userId} {
-      allow read: if isOwner(userId);
+      allow read: if isOwner(userId) || isAdmin();
       allow create: if isOwner(userId) && isValidUser(request.resource.data);
       allow update: if isOwner(userId) && isValidUser(request.resource.data);
     }
 
     match /innovations/{innovationId} {
-      allow read: if isDocOwner();
+      allow read: if isDocOwner() || isAdmin();
       allow create: if isAuthenticated() && 
-                      request.resource.data.userId == request.auth.uid && 
+                      (request.resource.data.userId == request.auth.uid || 
+                       (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.username == request.resource.data.userId)) && 
                       isValidInnovation(request.resource.data);
       allow update: if isDocOwner() && 
                       request.resource.data.userId == resource.data.userId &&
                       isValidInnovation(request.resource.data);
-      allow delete: if isDocOwner();
+      allow delete: if isDocOwner() || isAdmin();
+    }
+
+    match /custom_users/{username} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow write: if isAdmin();
     }
   }
 }
